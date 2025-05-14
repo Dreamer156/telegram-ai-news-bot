@@ -8,6 +8,7 @@ from aiogram.utils.markdown import hbold # Используем хелперы �
 
 from app.services import rss_service, ai_service, telegram_service
 from app.config import OPENAI_IMAGE_MODEL # Чтобы знать, используется ли DALL-E
+from app.utils.image_utils import get_final_image_url # <--- Импортируем новую функцию
 
 logger = logging.getLogger(__name__)
 router = Router() # Создаем экземпляр Router
@@ -71,22 +72,32 @@ async def cmd_post_latest_news(message: Message, bot: Bot):
         return
         
     formatted_text, image_prompt = ai_result
-    final_image_url_to_post = rss_image_url # По умолчанию используем картинку из RSS, если есть
+    # final_image_url_to_post = rss_image_url # <--- Старая логика
 
-    # Если картинки из RSS нет, ИЛИ если мы хотим всегда генерировать новую через DALL-E (можно сделать опционально)
-    # Сейчас: если нет из RSS, но есть промпт от AI и DALL-E настроен, генерируем.
-    if not final_image_url_to_post and image_prompt and OPENAI_IMAGE_MODEL:
-        await message.answer(f"Генерирую изображение для поста (промпт: {image_prompt[:100]}...)")
-        generated_dalle_url = await ai_service.generate_image_with_dalle(image_prompt)
-        if generated_dalle_url:
-            final_image_url_to_post = generated_dalle_url
-            await message.answer("Изображение сгенерировано.")
-        else:
-            await message.answer("Не удалось сгенерировать изображение. Пост будет без картинки от DALL-E.")
-    elif rss_image_url:
-         await message.answer("Использую изображение из RSS-ленты.")
+    # # Если картинки из RSS нет, ИЛИ если мы хотим всегда генерировать новую через DALL-E (можно сделать опционально)
+    # # Сейчас: если нет из RSS, но есть промпт от AI и DALL-E настроен, генерируем.
+    # if not final_image_url_to_post and image_prompt and OPENAI_IMAGE_MODEL:
+    #     await message.answer(f"Генерирую изображение для поста (промпт: {image_prompt[:100]}...)")
+    #     generated_dalle_url = await ai_service.generate_image_with_dalle(image_prompt)
+    #     if generated_dalle_url:
+    #         final_image_url_to_post = generated_dalle_url
+    #         await message.answer("Изображение сгенерировано.")
+    #     else:
+    #         await message.answer("Не удалось сгенерировать изображение. Пост будет без картинки от DALL-E.")
+    # elif rss_image_url:
+    #      await message.answer("Использую изображение из RSS-ленты.")
+    # else:
+    #     await message.answer("Изображение для поста не найдено и не будет сгенерировано.")
+
+    # Новая логика выбора изображения
+    # В user_commands мы можем логировать в ответ пользователю, а не только в консоль
+    await message.answer("Определяю изображение для поста согласно настройкам...")
+    final_image_url_to_post = await get_final_image_url(news_item, image_prompt)
+
+    if final_image_url_to_post:
+        await message.answer(f"Изображение для поста определено: {final_image_url_to_post}")
     else:
-        await message.answer("Изображение для поста не найдено и не будет сгенерировано.")
+        await message.answer("Пост будет опубликован без изображения.")
 
     await message.answer("Публикую пост в канал...")
     

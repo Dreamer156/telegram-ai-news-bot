@@ -33,13 +33,21 @@ async def post_to_channel(bot: Bot, text: str, image_url: Optional[str] = None, 
 
     try:
         photo_to_send: Optional[InputFile] = None
-        caption = text
+        caption = text[:1024] # Ограничиваем длину подписи к фото, если есть фото
 
         if image_path:
-            # TODO: Проверить, существует ли файл image_path
-            # Сейчас просто передаем как есть, aiogram должен справиться или выдать ошибку
-            photo_to_send = image_path # aiogram >3.0 может принимать путь как строку
-            logger.info(f"Отправка сообщения с локальным изображением: {image_path} в канал {TELEGRAM_CHANNEL_ID}")
+            try:
+                # Проверка на существование файла, если это локальный путь
+                # Это должно быть сделано перед вызовом, но для надежности можно и здесь
+                # import os; if not os.path.exists(image_path): logger.error(...); return False
+                photo_to_send = image_path
+                logger.info(f"Отправка сообщения с локальным изображением: {image_path} в канал {TELEGRAM_CHANNEL_ID}")
+            except Exception as e: # Ловим потенциальные ошибки с путем, если он некорректен
+                logger.error(f"Ошибка с локальным путем изображения '{image_path}': {e}", exc_info=True)
+                # Попытка отправить только текст
+                image_path = None # Сбрасываем, чтобы не пытаться отправить битое фото
+                photo_to_send = None
+
         elif image_url:
             if is_url(image_url):
                 # Для URLInputFile не нужна предварительная загрузка, aiogram сделает это.
@@ -56,14 +64,14 @@ async def post_to_channel(bot: Bot, text: str, image_url: Optional[str] = None, 
             await bot.send_photo(
                 chat_id=TELEGRAM_CHANNEL_ID,
                 photo=photo_to_send,
-                caption=caption,
-                parse_mode="HTML" # Убедитесь, что parse_mode в bot.py тоже HTML, если он там глобальный
+                caption=caption, # Используем ограниченную подпись
+                parse_mode="HTML"
             )
         else:
             logger.info(f"Отправка текстового сообщения в канал {TELEGRAM_CHANNEL_ID}")
             await bot.send_message(
                 chat_id=TELEGRAM_CHANNEL_ID,
-                text=text,
+                text=text, # Текст может быть длиннее для простого сообщения
                 parse_mode="HTML",
                 disable_web_page_preview=False # Можно сделать True, если превью ссылок не нужны
             )
@@ -72,11 +80,12 @@ async def post_to_channel(bot: Bot, text: str, image_url: Optional[str] = None, 
         return True
 
     except TelegramAPIError as e:
-        logger.error(f"Telegram API ошибка при отправке сообщения в канал {TELEGRAM_CHANNEL_ID}: {e}")
+        logger.error(f"Telegram API ошибка при отправке сообщения в канал {TELEGRAM_CHANNEL_ID}: {e.message}", exc_info=True) # Используем e.message и exc_info
         # Здесь можно добавить более специфичную обработку ошибок, например, если бот заблокирован в канале
+        # e.g., if "bot was blocked by the user" in str(e).lower(): ...
         return False
     except requests.exceptions.RequestException as e:
-        logger.error(f"Ошибка сети (requests) при попытке доступа к URL изображения {image_url}: {e}")
+        logger.error(f"Ошибка сети (requests) при попытке доступа к URL изображения {image_url}: {e}", exc_info=True) # Добавлено exc_info=True
         # Попытка отправить только текст, если изображение не удалось загрузить
         try:
             logger.warning(f"Попытка отправить только текстовое сообщение в канал {TELEGRAM_CHANNEL_ID} после ошибки с изображением.")
@@ -89,10 +98,10 @@ async def post_to_channel(bot: Bot, text: str, image_url: Optional[str] = None, 
             logger.info(f"Текстовое сообщение успешно отправлено в канал {TELEGRAM_CHANNEL_ID} после ошибки с изображением.")
             return True # Сообщение (текст) всё же отправлено
         except Exception as fallback_e:
-            logger.error(f"Ошибка при отправке текстового сообщения (fallback) в канал {TELEGRAM_CHANNEL_ID}: {fallback_e}")
+            logger.error(f"Ошибка при отправке текстового сообщения (fallback) в канал {TELEGRAM_CHANNEL_ID}: {fallback_e}", exc_info=True) # Добавлено exc_info=True
             return False
     except Exception as e:
-        logger.error(f"Непредвиденная ошибка при отправке сообщения в канал {TELEGRAM_CHANNEL_ID}: {e}")
+        logger.error(f"Непредвиденная ошибка при отправке сообщения в канал {TELEGRAM_CHANNEL_ID}: {e}", exc_info=True) # Добавлено exc_info=True
         return False
 
 # Для тестирования можно добавить:

@@ -71,6 +71,10 @@ async def reformat_news_for_channel(news_title: str, news_summary: str, news_lin
             max_tokens=1000 # Ограничение на длину ответа
         )
         
+        if not response.choices or not response.choices[0].message or not response.choices[0].message.content:
+            logger.error(f"Получен пустой или некорректный ответ от OpenAI API для новости: {news_title}")
+            return None
+
         ai_response_text = response.choices[0].message.content.strip()
         
         # Разделяем текст поста и промпт для изображения
@@ -97,8 +101,17 @@ async def reformat_news_for_channel(news_title: str, news_summary: str, news_lin
             logger.warning("Ответ AI слишком короткий или не содержит явного промпта для изображения, используется запасной.")
             return formatted_text, image_prompt
 
+    except openai.APIConnectionError as e:
+        logger.error(f"Ошибка соединения с OpenAI API: {e}", exc_info=True)
+        return None
+    except openai.RateLimitError as e:
+        logger.error(f"Превышен лимит запросов к OpenAI API: {e}", exc_info=True)
+        return None
+    except openai.APIStatusError as e:
+        logger.error(f"Ошибка статуса OpenAI API (код {e.status_code}): {e.response}", exc_info=True)
+        return None
     except Exception as e:
-        logger.error(f"Ошибка при взаимодействии с OpenAI API: {e}")
+        logger.error(f"Непредвиденная ошибка при взаимодействии с OpenAI API для реформатирования: {e}", exc_info=True)
         return None
 
 async def generate_image_with_dalle(prompt: str) -> Optional[str]:
@@ -123,11 +136,24 @@ async def generate_image_with_dalle(prompt: str) -> Optional[str]:
             n=1, # Генерируем одно изображение
             size="1024x1024" # Стандартный размер
         )
+        if not response.data or not response.data[0].url:
+            logger.error(f"Получен пустой или некорректный ответ от DALL-E API для промпта: {prompt}")
+            return None
+            
         image_url = response.data[0].url
         logger.info(f"Изображение успешно сгенерировано: {image_url}")
         return image_url
+    except openai.APIConnectionError as e:
+        logger.error(f"Ошибка соединения с DALL-E API: {e}", exc_info=True)
+        return None
+    except openai.RateLimitError as e:
+        logger.error(f"Превышен лимит запросов к DALL-E API: {e}", exc_info=True)
+        return None
+    except openai.APIStatusError as e:
+        logger.error(f"Ошибка статуса DALL-E API (код {e.status_code}): {e.response}", exc_info=True)
+        return None
     except Exception as e:
-        logger.error(f"Ошибка при генерации изображения DALL-E: {e}")
+        logger.error(f"Непредвиденная ошибка при генерации изображения DALL-E: {e}", exc_info=True)
         return None
 
 # Пример использования:

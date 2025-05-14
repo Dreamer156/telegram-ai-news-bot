@@ -22,7 +22,8 @@ async def fetch_feed_entries() -> List[Dict]:
     try:
         # feedparser не является асинхронным по умолчанию, выполняем в executor
         loop = asyncio.get_event_loop()
-        parsed_feed = await loop.run_in_executor(None, feedparser.parse, RSS_FEED_URL)
+        # Добавим timeout для операции парсинга
+        parsed_feed = await asyncio.wait_for(loop.run_in_executor(None, feedparser.parse, RSS_FEED_URL), timeout=30.0) 
         
         if parsed_feed.bozo:
             # bozo установлен в 1, если лента не корректно сформирована
@@ -46,8 +47,11 @@ async def fetch_feed_entries() -> List[Dict]:
             logger.warning(f"В RSS-ленте не найдено записей: {RSS_FEED_URL}")
             return []
             
+    except asyncio.TimeoutError:
+        logger.error(f"Тайм-аут при загрузке или парсинге RSS-ленты {RSS_FEED_URL}")
+        return []
     except Exception as e:
-        logger.error(f"Ошибка при загрузке или парсинге RSS-ленты {RSS_FEED_URL}: {e}")
+        logger.error(f"Ошибка при загрузке или парсинге RSS-ленты {RSS_FEED_URL}: {e}", exc_info=True)
         return []
 
 async def get_latest_news(count: int = 1) -> List[Dict]:
