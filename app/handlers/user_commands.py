@@ -446,91 +446,74 @@ async def cmd_prepare_post(message: Message, bot: Bot, state: FSMContext):
 
 @router.callback_query(PostConfirmationCallback.filter(F.action == "publish"), StateFilter(PreparePostStates.awaiting_confirmation))
 async def cq_publish_prepared_post(query: CallbackQuery, callback_data: PostConfirmationCallback, bot: Bot, state: FSMContext):
+    """Handles the 'Publish' action from the confirmation inline keyboard."""
     user_data = await state.get_data()
-    prepared_text = user_data.get("prepared_text")
+    prepared_post_text = user_data.get("prepared_text")
     prepared_image_url = user_data.get("prepared_image_url")
-    news_link = user_data.get("news_link")
-    news_title = user_data.get("news_title", "Без заголовка")
+    original_news_link = user_data.get("news_link")
 
-    if not prepared_text:
-        await query.answer("Ошибка: не найден текст для публикации. Попробуйте подготовить пост заново.", show_alert=True)
+    if not prepared_post_text or not original_news_link:
+        error_message = "Ошибка: Не удалось найти подготовленные данные для поста. Пожалуйста, попробуйте /prepare_post снова."
+        if query.message.content_type == ContentType.PHOTO:
+            await query.message.edit_caption(caption=error_message, reply_markup=None, parse_mode=ParseMode.HTML.value)
+        else:
+            await query.message.edit_text(error_message, reply_markup=None, parse_mode=ParseMode.HTML.value)
+        await query.answer("Ошибка данных поста.", show_alert=True)
         await state.clear()
-        await query.message.edit_reply_markup(reply_markup=None)
         return
 
-    await query.answer("Публикую пост в канал...") # Ответ на нажатие кнопки
+    logger.info(f"Публикация подтверждена администратором {query.from_user.id}. Текст: {prepared_post_text[:50]}... URL: {prepared_image_url}")
 
-    success = await telegram_service.post_to_channel(
-        bot=bot,
-        text=prepared_text, # Pass HTML directly (it was stored as prepared_text from AI)
-        image_url=prepared_image_url
-    )
+    try:
+        success = await telegram_service.post_to_channel(
+            bot=bot,
+            text=prepared_post_text,
+            image_url=prepared_image_url,
+            # channel_id is already handled by telegram_service using config
+        )
 
-    await state.clear() # Clear state regardless of success, as the action is done.
-
-    if success:
-        if news_link:
-            save_posted_link(POSTED_LINKS_FILE, news_link)
-            logger.info(f"Опубликована новость '{news_title}' ({news_link}) через превью администратором {query.from_user.id}")
+        if success:
+            # Save the link as posted
+            save_posted_link(POSTED_LINKS_FILE, original_news_link) 
+            logger.info(f"Ссылка {original_news_link} сохранена как опубликованная после подтверждения.")
+            
+            confirmation_message = f"✅ Пост опубликован!\n\n{prepared_post_text[:300]}..."
+            if query.message.content_type == ContentType.PHOTO:
+                await query.message.edit_caption(caption=confirmation_message, reply_markup=None, parse_mode=ParseMode.HTML.value)
+            else:
+                await query.message.edit_text(text=confirmation_message, reply_markup=None, parse_mode=ParseMode.HTML.value)
+            await query.answer("Пост успешно опубликован!", show_alert=False)
         else:
-            logger.info(f"Опубликована новость '{news_title}' (без ссылки) через превью администратором {query.from_user.id}")
-        
-        post_title_snippet = news_title[:50]
-        # Construct HTML confirmation message, escaping the dynamic title part
-        confirmation_text = f'✅ Пост "<b>{html.escape(post_title_snippet)}</b>..." успешно опубликован в канале!'
-        
-        # Check content type of the original message to decide edit_text or edit_caption
+            error_message = "❌ Не удалось опубликовать пост в канал. Проверьте логи."
+            if query.message.content_type == ContentType.PHOTO:
+                await query.message.edit_caption(caption=error_message, reply_markup=None, parse_mode=ParseMode.HTML.value)
+            else:
+                await query.message.edit_text(error_message, reply_markup=None, parse_mode=ParseMode.HTML.value)
+            await query.answer("Ошибка публикации.", show_alert=True)
+
+    except Exception as e:
+        logger.error(f"Исключение при публикации подтвержденного поста: {e}", exc_info=True)
+        error_message_exc = f"Критическая ошибка при публикации: {html.escape(str(e))}"
         if query.message.content_type == ContentType.PHOTO:
-            await query.message.edit_caption(
-                caption=confirmation_text,
-                reply_markup=None, # Remove buttons
-                parse_mode=ParseMode.HTML.value
-            )
-        else: # Assuming it was a text message if not a photo
-            await query.message.edit_text(
-                text=confirmation_text, 
-                reply_markup=None, # Remove buttons
-                parse_mode=ParseMode.HTML.value
-            )
-    else:
-        # Construct HTML error message, escaping the dynamic title part
-        error_message_admin = f"❌ Ошибка при публикации поста '<b>{html.escape(news_title[:50])}</b>...' в канал. Детали в логах."
-        if query.message.content_type == ContentType.PHOTO:
-            await query.message.edit_caption(
-                caption=error_message_admin,
-                reply_markup=None, # Remove buttons
-                parse_mode=ParseMode.HTML.value
-            )
+            await query.message.edit_caption(caption=error_message_exc, reply_markup=None, parse_mode=ParseMode.HTML.value)
         else:
-            await query.message.edit_text(
-                text=error_message_admin, 
-                reply_markup=None, # Remove buttons
-                parse_mode=ParseMode.HTML.value
-            )
+            await query.message.edit_text(error_message_exc, reply_markup=None, parse_mode=ParseMode.HTML.value) 
+        await query.answer("Критическая ошибка.", show_alert=True)
+    finally:
+        await state.clear()
 
 @router.callback_query(PostConfirmationCallback.filter(F.action == "cancel"), StateFilter(PreparePostStates.awaiting_confirmation))
 async def cq_cancel_prepared_post(query: CallbackQuery, callback_data: PostConfirmationCallback, state: FSMContext):
-    user_data = await state.get_data()
-    news_title = user_data.get("news_title", "Без заголовка")
-    
-    await query.answer("Публикация отменена.")
-    await state.clear() # Clear state on cancellation
-
-    # Construct HTML cancel message, escaping the dynamic title part
-    cancel_text = f"❌ Публикация поста \"<b>{html.escape(news_title[:50])}</b>...\" отменена."
+    """Handles the 'Cancel' action from the confirmation inline keyboard."""
+    logger.info(f"Публикация отменена администратором {query.from_user.id}")
+    cancel_message = "Публикация отменена администратором. 🛑"
     
     if query.message.content_type == ContentType.PHOTO:
-        await query.message.edit_caption(
-            caption=cancel_text,
-            reply_markup=None, # Remove buttons
-            parse_mode=ParseMode.HTML.value
-        )
+        await query.message.edit_caption(caption=cancel_message, reply_markup=None) # Assuming plain text for simple cancel message
     else:
-        await query.message.edit_text(
-            text=cancel_text, 
-            reply_markup=None, # Remove buttons
-            parse_mode=ParseMode.HTML.value
-        )
-    logger.info(f"Публикация новости '{news_title}' отменена администратором {query.from_user.id}")
+        await query.message.edit_text(text=cancel_message, reply_markup=None)
+        
+    await query.answer("Публикация отменена.", show_alert=False)
+    await state.clear()
 
 # Не забыть зарегистрировать router в app/bot.py: dp.include_router(user_commands.router) 

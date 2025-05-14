@@ -88,29 +88,44 @@ async def post_to_channel(bot: Bot, text: str, image_url: Optional[str] = None, 
         logger.info(f"Сообщение успешно отправлено в канал {TELEGRAM_CHANNEL_ID}.")
         return True
 
-    except TelegramAPIError as e:
-        logger.error(f"Telegram API ошибка при отправке сообщения в канал {TELEGRAM_CHANNEL_ID}: {e.message}", exc_info=True) # Используем e.message и exc_info
-        # Здесь можно добавить более специфичную обработку ошибок, например, если бот заблокирован в канале
-        # e.g., if "bot was blocked by the user" in str(e).lower(): ...
+    except TelegramAPIError as e: # Catches TelegramBadRequest and other API errors
+        failed_content_preview = text[:200].replace('\n', ' ') + "..."
+        logger.error(
+            f"Telegram API ошибка при отправке сообщения в канал {TELEGRAM_CHANNEL_ID}. "
+            f"Ошибка: {e.message}. Код: {getattr(e, 'error_code', 'N/A')}. "
+            f"URL изображения (если был): {image_url}. "
+            f"Текст поста (начало): '{failed_content_preview}'", 
+            exc_info=True
+        )
         return False
     except requests.exceptions.RequestException as e:
-        logger.error(f"Ошибка сети (requests) при попытке доступа к URL изображения {image_url}: {e}", exc_info=True) # Добавлено exc_info=True
-        # Попытка отправить только текст, если изображение не удалось загрузить
+        logger.error(f"Ошибка сети (requests) при попытке доступа к URL изображения {image_url}: {e}", exc_info=True)
         try:
             logger.warning(f"Попытка отправить только текстовое сообщение в канал {TELEGRAM_CHANNEL_ID} после ошибки с изображением.")
             await bot.send_message(
                 chat_id=TELEGRAM_CHANNEL_ID,
-                text=text, # Use pre-formatted HTML in fallback as well
+                text=text, 
                 parse_mode="HTML",
                 disable_web_page_preview=False
             )
             logger.info(f"Текстовое сообщение успешно отправлено в канал {TELEGRAM_CHANNEL_ID} после ошибки с изображением.")
-            return True # Сообщение (текст) всё же отправлено
+            return True 
         except Exception as fallback_e:
-            logger.error(f"Ошибка при отправке текстового сообщения (fallback) в канал {TELEGRAM_CHANNEL_ID}: {fallback_e}", exc_info=True) # Добавлено exc_info=True
+            failed_content_preview = text[:200].replace('\n', ' ') + "..."
+            logger.error(
+                f"Ошибка при отправке текстового сообщения (fallback) в канал {TELEGRAM_CHANNEL_ID}: {fallback_e}. "
+                f"Текст поста (начало): '{failed_content_preview}'", 
+                exc_info=True
+            )
             return False
     except Exception as e:
-        logger.error(f"Непредвиденная ошибка при отправке сообщения в канал {TELEGRAM_CHANNEL_ID}: {e}", exc_info=True) # Добавлено exc_info=True
+        failed_content_preview = text[:200].replace('\n', ' ') + "..."
+        logger.error(
+            f"Непредвиденная ошибка при отправке сообщения в канал {TELEGRAM_CHANNEL_ID}: {e}. "
+            f"URL изображения (если был): {image_url}. "
+            f"Текст поста (начало): '{failed_content_preview}'", 
+            exc_info=True
+        ) 
         return False
 
 # Для тестирования можно добавить:

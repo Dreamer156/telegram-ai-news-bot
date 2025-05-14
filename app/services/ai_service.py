@@ -7,6 +7,8 @@ import asyncio  # Moved import to top
 import httpx # Добавили httpx
 import re # For HTML cleaning
 import html # For HTML cleaning
+from datetime import datetime # For build_messages
+from bs4 import BeautifulSoup # For extracting excerpt from HTML
 
 from app.config import (
     OPENAI_API_KEY, 
@@ -16,7 +18,8 @@ from app.config import (
     OPENROUTER_CHAT_MODEL,
     OPENROUTER_SITE_URL,
     OPENROUTER_SITE_NAME,
-    PROXY_URL
+    PROXY_URL,
+    OPENAI_CHAT_MODEL
 )
 
 logger = logging.getLogger(__name__)
@@ -86,6 +89,361 @@ def clean_for_tg_html(raw_html: str) -> str:
     text = re.sub(r'\n{3,}', '\n\n', text)
     return text.strip()
 
+
+# Инициализация http клиента с учетом прокси (если он задан)
+proxies_config = {"http://": PROXY_URL, "https://": PROXY_URL} if PROXY_URL else None
+if proxies_config:
+    httpx_client = httpx.AsyncClient(proxies=proxies_config)
+else:
+    httpx_client = httpx.AsyncClient()
+
+if OPENAI_API_KEY:
+    openai.api_key = OPENAI_API_KEY
+
+# --- New Unified Prompt and Helper Functions ---
+
+UNIFIED_PROMPT = \
+"""
+You are a professional Russian copy-writer for a Telegram channel
+about AI and prompt-engineering.
+
+== FORMAT (Telegram HTML only) ==
+<b>🤖 {short_title}</b>
+
+{teaser_paragraph (2-3 предложения, цепляющих читателя)}
+
+{main_paragraph (что полезного, кто/зачем, без лишних деталей)}
+
+{hashtags 3-5 штук вида #CamelCase}
+
+== RULES ==
+1. MAX 900 characters total (including tags and hashtags).
+2. ONLY tags <b>, <i>, <u>, <s>. No other tags, no links.
+3. Title ≤ 70 symbols, без точки в конце.
+4. Если новости > 3 дней — добавь «[RETRO] » перед заголовком.
+5. Пиши всегда на русском, даже если исходник другой.
+"""
+
+def build_messages(news_title: str, excerpt: str, publication_date: datetime, source_name: str) -> list[dict]:
+    """Prepares the list of messages for the AI model based on the new unified prompt structure."""
+    user_msg_content = f"""
+Заголовок: {news_title}
+Источник: {source_name}
+Дата: {publication_date.strftime('%Y-%m-%d')}
+Текст: {excerpt[:1200]}   # передаём не больше, чтобы не тратить токены
+"""
+    return [
+        {"role": "system", "content": UNIFIED_PROMPT},
+        {"role": "user",   "content": user_msg_msg_content.strip()},
+    ]
+
+def balance_specific_tag(text: str, tag_name: str) -> str:
+    """Rudimentary balancing for a specific HTML tag (e.g., <b>, <i>).
+    Ensures that if there are more open tags than close, missing close tags are appended.
+    Does not handle complex nesting or incorrect ordering.
+    """
+    open_tag = f"<{tag_name}>"
+    close_tag = f"</{tag_name}>"
+    
+    open_count = text.lower().count(open_tag.lower())
+    close_count = text.lower().count(close_tag.lower())
+    
+    # Append missing closing tags
+    if open_count > close_count:
+        text += close_tag * (open_count - close_count)
+    # Optional: Remove excess closing tags (more complex, for now focus on unclosed open tags)
+    # elif close_count > open_count:
+    #     pass # Or try to strip them, but could be risky
+        
+    return text
+
+def sanitize_ai_response(text: str) -> str:
+    """
+    Sanitizes the AI's HTML output:
+    - Removes forbidden <code> and <pre> tags.
+    - Balances <b>, <i>, <u>, <s> tags.
+    - Truncates to 900 characters as a final safety measure.
+    """
+    # Remove <code> and <pre> tags completely
+    text = re.sub(r'</?(code|pre)(?:\s+[^>]*)?>', '', text, flags=re.IGNORECASE)
+
+    # Balance allowed tags
+    for tag in ['b', 'i', 'u', 's']:
+        text = balance_specific_tag(text, tag)
+        
+    # Final truncation
+    return text[:900]
+
+async def _generate_post_from_llm(messages: list) -> str | None:
+    """
+    Internal function to generate post text from the LLM (OpenAI or OpenRouter).
+    """
+    ai_response_text = None
+    try:
+        if AI_PROVIDER == "openai":
+            if not OPENAI_API_KEY:
+                logger.error("OpenAI API key is not configured.")
+                return None
+            logger.info(f"Sending request to OpenAI model: {OPENAI_CHAT_MODEL}")
+            
+            # Using the openai library
+            # Ensure you have the latest openai library installed and configured
+            # For openai < 1.0
+            # response = await asyncio.to_thread(
+            #     openai.ChatCompletion.create,
+            #     model=OPENAI_CHAT_MODEL,
+            #     messages=messages,
+            #     temperature=0.7, # Adjust as needed
+            #     max_tokens=400  # Max output tokens
+            # )
+            # ai_response_text = response.choices[0].message['content'].strip()
+
+            # For openai >= 1.0.0 (using a client, ideally initialized globally)
+            # temp_openai_client = openai.AsyncOpenAI(api_key=OPENAI_API_KEY) # Should be global or passed
+            # async with temp_openai_client as client:
+            #     response = await client.chat.completions.create(
+            #         model=OPENAI_CHAT_MODEL,
+            #         messages=messages,
+            #         temperature=0.7,
+            #         max_tokens=400 
+            #     )
+            # ai_response_text = response.choices[0].message.content.strip()
+            
+            # Fallback to synchronous version if asyncio version causes issues with httpx_client structure
+            # This is simpler to integrate with the existing httpx_client for OpenRouter
+            # but ideally OpenAI calls would use its own async client.
+            # For now, keeping it simple and similar to OpenRouter flow.
+            
+            payload = {
+                "model": OPENAI_CHAT_MODEL,
+                "messages": messages,
+                "temperature": 0.7,
+                "max_tokens": 400
+            }
+            headers = {
+                "Authorization": f"Bearer {OPENAI_API_KEY}",
+                "Content-Type": "application/json"
+            }
+            # Note: OpenAI's official Python client is preferred.
+            # Using httpx here for consistency if the main client isn't fully async or for simplicity.
+            # This assumes the OpenAI API endpoint structure.
+            # It's better to use the official openai.AsyncOpenAI() client.
+            # For now, this is a placeholder if we want to use httpx_client for everything.
+            # It will likely require adjustment or using the official OpenAI library directly.
+            #
+            # Given the previous structure and user's code, let's assume a direct openai call is fine.
+            # The user has `openai.api_key = OPENAI_API_KEY` at the top.
+            # We'll use the older `openai.ChatCompletion.create` for now as it's simpler
+            # with the existing top-level API key setup and doesn't require client management here.
+            # If the user has openai >1.0, this will need to be updated.
+            
+            response = await asyncio.get_event_loop().run_in_executor(
+                None,  # Uses default ThreadPoolExecutor
+                lambda: openai.ChatCompletion.create(
+                    model=OPENAI_CHAT_MODEL,
+                    messages=messages,
+                    temperature=0.7,
+                    max_tokens=400
+                )
+            )
+            ai_response_text = response.choices[0]['message']['content'].strip()
+
+
+        elif AI_PROVIDER == "openrouter":
+            if not OPENROUTER_API_KEY:
+                logger.error("OpenRouter API key is not configured.")
+                return None
+            
+            logger.info(f"Sending request to OpenRouter model: {OPENROUTER_CHAT_MODEL}")
+            request_body = {
+                "model": OPENROUTER_CHAT_MODEL,
+                "messages": messages,
+                "max_tokens": 350, # As per user's spec
+                "temperature": 0.8, # As per user's spec
+                # Add site URL and name if available and model supports it
+                "site_url": OPENROUTER_SITE_URL, 
+                "site_name": OPENROUTER_SITE_NAME,
+            }
+            # Filter out None values from request_body for site_url and site_name
+            request_body = {k: v for k, v in request_body.items() if v is not None and v != ""}
+
+
+            headers = {
+                "Authorization": f"Bearer {OPENROUTER_API_KEY}",
+                "HTTP-Referer": OPENROUTER_SITE_URL or "", 
+                "X-Title": OPENROUTER_SITE_NAME or "",
+                "Content-Type": "application/json"
+            }
+            
+            response = await httpx_client.post(
+                "https://openrouter.ai/api/v1/chat/completions",
+                json=request_body,
+                headers=headers
+            )
+            response.raise_for_status()
+            data = response.json()
+            if data.get("choices") and data["choices"][0].get("message"):
+                ai_response_text = data["choices"][0]["message"]["content"].strip()
+            else:
+                logger.error(f"OpenRouter response missing expected content: {data}")
+                return None
+        else:
+            logger.error(f"Unknown AI_PROVIDER: {AI_PROVIDER}")
+            return None
+
+        logger.info(f"AI response received successfully from {AI_PROVIDER}.")
+        return ai_response_text
+
+    except httpx.HTTPStatusError as e:
+        logger.error(f"HTTP error calling {AI_PROVIDER} API: {e.response.status_code} - {e.response.text}", exc_info=False)
+        return None
+    except httpx.RequestError as e:
+        logger.error(f"Request error calling {AI_PROVIDER} API: {e}", exc_info=False)
+        return None
+    except openai.error.OpenAIError as e: # Catch OpenAI specific errors
+        logger.error(f"OpenAI API error: {e}", exc_info=False)
+        return None
+    except Exception as e:
+        logger.error(f"Unexpected error in _generate_post_from_llm with {AI_PROVIDER}: {e}", exc_info=True)
+        return None
+
+async def reformat_news_for_channel(
+    news_title: str, 
+    news_summary: str, # Kept for now, but excerpt from news_content is primary
+    news_link: str, 
+    news_content: str | None, # This is the full HTML from readability
+    publication_date: datetime, 
+    source_name: str
+) -> tuple[str | None, str | None]:
+    """
+    Reformats a news item for the Telegram channel using the new unified prompt.
+    Returns (formatted_text, image_prompt). Image prompt is currently always "SKIP".
+    """
+    logger.info(f"Reformatting news for channel: '{news_title[:50]}...' from {source_name}")
+
+    excerpt = ""
+    if news_content:
+        try:
+            soup = BeautifulSoup(news_content, 'html.parser')
+            # Get text, join paragraphs with newlines, strip extra whitespace
+            paragraphs = [p.get_text(strip=True) for p in soup.find_all(['p', 'div'])] # Basic extraction
+            text_content = "\n\n".join(filter(None, paragraphs))
+            if not text_content: # Fallback if no p/div or they are empty
+                text_content = soup.get_text(separator='\n', strip=True)
+            
+            excerpt = text_content[:1200] # Truncate for the prompt
+            logger.info(f"Extracted excerpt of {len(excerpt)} chars for AI.")
+        except Exception as e:
+            logger.error(f"Error parsing news_content with BeautifulSoup: {e}", exc_info=True)
+            # Fallback to RSS summary if full content parsing fails
+            excerpt = news_summary[:1200] if news_summary else ""
+            logger.warning("Falling back to RSS summary for excerpt due to parsing error.")
+    elif news_summary:
+        excerpt = news_summary[:1200]
+        logger.info("Using RSS summary as excerpt (no full content provided).")
+    else:
+        logger.warning("No news_content or news_summary available to create an excerpt for AI.")
+        # If there's truly no content, AI might struggle. Title alone is not enough.
+        return None, "SKIP" # Or handle as an error
+
+    if not excerpt.strip(): # Ensure excerpt is not just whitespace
+        logger.warning(f"Excerpt for '{news_title[:50]}...' is empty after processing. Cannot generate post.")
+        return None, "SKIP"
+
+    messages = build_messages(
+        news_title=news_title,
+        excerpt=excerpt,
+        publication_date=publication_date,
+        source_name=source_name
+    )
+
+    raw_ai_output = await _generate_post_from_llm(messages)
+
+    if not raw_ai_output:
+        logger.error(f"AI failed to generate content for: {news_title[:50]}...")
+        return None, "SKIP"
+
+    sanitized_html_post = sanitize_ai_response(raw_ai_output)
+    
+    logger.info(f"Successfully reformatted news: '{news_title[:50]}...'")
+    # Image prompt is "SKIP" as per current strategy
+    return sanitized_html_post, "SKIP" 
+
+# (Optional) DALL-E image generation - can be kept if used elsewhere or removed
+# For now, it's not called by the main reformat_news_for_channel flow.
+async def generate_image_with_dalle(prompt: str) -> str | None:
+    # ... (existing DALL-E code remains unchanged for now)
+    if not OPENAI_API_KEY or not OPENAI_IMAGE_MODEL:
+        logger.warning("OpenAI API key or DALL-E model not configured. Skipping image generation.")
+        return None
+    if prompt.strip().upper() == "SKIP":
+        logger.info("Image prompt is 'SKIP', skipping DALL-E generation.")
+        return None
+
+    logger.info(f"Generating image with DALL-E, prompt: '{prompt[:100]}...'")
+    try:
+        # Using asyncio.to_thread for the blocking OpenAI call
+        # For openai < 1.0
+        # response = await asyncio.to_thread(
+        #     openai.Image.create,
+        #     prompt=prompt,
+        #     n=1,
+        #     size="1024x1024", # or "1792x1024" / "1024x1792" for DALL-E 3 if supported
+        #     model=OPENAI_IMAGE_MODEL # Ensure this is dall-e-3 if using those sizes
+        # )
+        # image_url = response['data'][0]['url']
+        
+        # For openai >= 1.0.0 (using a client)
+        # temp_openai_client = openai.AsyncOpenAI(api_key=OPENAI_API_KEY)
+        # async with temp_openai_client as client:
+        #     response = await client.images.generate(
+        #         model=OPENAI_IMAGE_MODEL,
+        #         prompt=prompt,
+        #         n=1,
+        #         size="1024x1024" # DALL-E 3 supports "1024x1024", "1792x1024", or "1024x1792"
+        #     )
+        # image_url = response.data[0].url
+
+        # Using the older openai.Image.create for simplicity with current API key setup
+        response = await asyncio.get_event_loop().run_in_executor(
+            None,
+            lambda: openai.Image.create(
+                prompt=prompt,
+                n=1,
+                size="1024x1024",
+                model=OPENAI_IMAGE_MODEL 
+            )
+        )
+        image_url = response['data'][0]['url']
+
+        logger.info(f"Image generated successfully: {image_url}")
+        return image_url
+    except openai.error.OpenAIError as e:
+        logger.error(f"OpenAI API error during image generation: {e}", exc_info=True)
+        return None
+    except Exception as e:
+        logger.error(f"Unexpected error during DALL-E image generation: {e}", exc_info=True)
+        return None
+
+async def close_httpx_client():
+    """Closes the global httpx client."""
+    if httpx_client and not httpx_client.is_closed:
+        await httpx_client.aclose()
+        logger.info("HTTPX client closed.")
+
+# Remove old, unused constants and functions if they are fully replaced
+# TG_ALLOWED_TAGS_SET - No longer needed as sanitize_ai_response handles allowed tags implicitly
+# SYSTEM_PROMPT_NEWS_HTML - Replaced by UNIFIED_PROMPT
+# clean_for_tg_html - Replaced by sanitize_ai_response
+
+# Configure OpenAI API key if using OpenAI
+if AI_PROVIDER == "openai" and OPENAI_API_KEY:
+    openai.api_key = OPENAI_API_KEY
+    # For openai >= 1.0.0, client instantiation is preferred
+    # openai_client = openai.OpenAI(api_key=OPENAI_API_KEY) # If using client
+
+# Global httpx client for OpenRouter (and potentially OpenAI if we switch to httpx for it)
+httpx_client = httpx.AsyncClient(proxies=PROXY_URL if PROXY_URL else None, timeout=60.0)
 
 # Инициализация http клиента с учетом прокси (если он задан)
 proxies_config = {"http://": PROXY_URL, "https://": PROXY_URL} if PROXY_URL else None

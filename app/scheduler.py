@@ -3,9 +3,11 @@ import os # Добавлен os для работы с файлами
 from collections import deque # Для FIFO очереди при ограничении файла
 from aiogram import Bot
 import aiohttp # Added for ClientSession
+from datetime import datetime # For type hinting and default date
 
 from app.services import rss_service, ai_service, telegram_service
 from app.services.content_fetch_service import fetch_article_content 
+from app.services.rss_service import get_entry_published_datetime
 from app.config import OPENAI_IMAGE_MODEL, POSTED_LINKS_FILE, MAX_POSTED_LINKS_IN_FILE
 from app.utils.image_utils import get_final_image_url
 
@@ -58,7 +60,7 @@ async def process_and_post_news(bot: Bot, news_item: dict, http_session: aiohttp
         return
 
     if link in POSTED_NEWS_LINKS:
-        logger.info(f"Новость \"{title}\" ({link}) уже была опубликована (проверено по файлу/памяти), пропускаем.")
+        logger.info(f"Новость \"{title}\" ({link}) уже была опубликована, пропускаем.")
         return
 
     logger.info(f"Получена новая новость для постинга: \"{title}\". ({link})")
@@ -82,6 +84,20 @@ async def process_and_post_news(bot: Bot, news_item: dict, http_session: aiohttp
     # Priority: 1. Fetched full content, 2. RSS full content field, 3. RSS summary
     final_content_for_ai = fetched_full_content or rss_full_content_value or summary_from_rss
 
+    # Get publication date and source for the AI
+    publication_date = get_entry_published_datetime(news_item)
+    if not publication_date:
+        logger.warning(f"Не удалось определить дату публикации для новости '{title}'. Используем текущую дату.")
+        publication_date = datetime.now() # Fallback to current date
+
+    source_info = news_item.get('feed_source_url') # This was added in rss_service
+    if not source_info:
+        # Fallback to feed title from the feedparser entry if feed_source_url is not present
+        feed_data = news_item.get('feed', {}) 
+        source_info = feed_data.get('title', "Неизвестный источник")
+        if source_info == "Неизвестный источник": # Further fallback if feed title is also missing
+            logger.warning(f"Не удалось определить URL или название источника для новости '{title}'.")
+
     # Попытка извлечь URL изображения из RSS
     rss_image_url: str | None = None
     if hasattr(news_item, 'media_content') and news_item.media_content and isinstance(news_item.media_content, list):
@@ -104,7 +120,9 @@ async def process_and_post_news(bot: Bot, news_item: dict, http_session: aiohttp
         news_title=title,
         news_summary=summary_from_rss, # We can still pass the original summary for context if AI needs it
         news_link=link,
-        news_content=final_content_for_ai # Pass the potentially richer content
+        news_content=final_content_for_ai, # Pass the potentially richer content
+        publication_date=publication_date, # Pass the publication date
+        source_name=source_info           # Pass the source information
     )
     
     if not ai_result:
