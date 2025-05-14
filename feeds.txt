@@ -1,0 +1,16 @@
+https://www.wired.com/feed/tag/artificial-intelligence/
+https://rss.app/feeds/t2I4sn6qqiENiUx0.xml
+# MIT Technology Review → Computing
+# https://www.technologyreview.com/c/computing/rss/
+# TechCrunch → AI
+# https://techcrunch.com/tag/artificial-intelligence/feed/
+# VentureBeat → AI
+# https://venturebeat.com/category/ai/feed/
+# MarkTechPost
+# https://www.marktechpost.com/feed
+# The Decoder
+# https://the-decoder.com/feed/
+# Unite.AI
+# https://www.unite.ai/feed/
+# SyncedReview
+# https://syncedreview.com/feed/ 
