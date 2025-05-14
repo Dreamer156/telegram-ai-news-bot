@@ -1,6 +1,15 @@
-aiogram==3.*
-feedparser
-openai
-python-dotenv
-requests  # Для загрузки изображений
-APScheduler 
+python-dotenv==1.0.1
+aiogram==3.7.0
+APScheduler==3.10.4
+feedparser==6.0.11
+openai==1.28.0
+Pillow==10.3.0
+requests==2.31.0
+# python-telegram-bot==21.2 # Already commented out
+# beautifulsoup4==4.12.3 # Not used currently
+markdown==3.6 # Added for Markdown to HTML conversion
+beautifulsoup4==4.12.3
+readability-lxml==0.8.1
+aiohttp==3.9.5
+
+# For image loading (Original comment was in Cyrillic) 

@@ -2,6 +2,7 @@ import logging
 from typing import Optional
 import requests
 import io
+import html
 
 from aiogram import Bot
 from aiogram.types import InputFile, URLInputFile
@@ -19,7 +20,7 @@ async def post_to_channel(bot: Bot, text: str, image_url: Optional[str] = None, 
 
     Args:
         bot: Экземпляр aiogram Bot.
-        text: Текст сообщения (поддерживает HTML-разметку).
+        text: Текст сообщения (HTML-разметка, готовая к отправке).
         image_url: URL изображения для отправки.
         image_path: Локальный путь к изображению для отправки.
                     Приоритетнее image_url, если указаны оба.
@@ -31,9 +32,17 @@ async def post_to_channel(bot: Bot, text: str, image_url: Optional[str] = None, 
         logger.error("TELEGRAM_CHANNEL_ID не настроен. Невозможно отправить сообщение.")
         return False
 
+    # text is now assumed to be ready HTML, so no escaping here
+    # escaped_text = html.escape(text) # <--- REMOVE THIS
+
     try:
         photo_to_send: Optional[InputFile] = None
-        caption = text[:1024] # Ограничиваем длину подписи к фото, если есть фото
+        # Caption also uses the raw HTML text, truncated
+        # escaped_caption = html.escape(text) # <--- REMOVE THIS
+        # Ensure caption is not too long for Telegram (1024 chars)
+        # A simple slice might break HTML tags. For now, we'll use a simple slice.
+        # A more robust solution would parse HTML and truncate text content.
+        caption_for_photo = text[:1024]
 
         if image_path:
             try:
@@ -64,14 +73,14 @@ async def post_to_channel(bot: Bot, text: str, image_url: Optional[str] = None, 
             await bot.send_photo(
                 chat_id=TELEGRAM_CHANNEL_ID,
                 photo=photo_to_send,
-                caption=caption, # Используем ограниченную подпись
+                caption=caption_for_photo, # Use pre-formatted, truncated HTML
                 parse_mode="HTML"
             )
         else:
             logger.info(f"Отправка текстового сообщения в канал {TELEGRAM_CHANNEL_ID}")
             await bot.send_message(
                 chat_id=TELEGRAM_CHANNEL_ID,
-                text=text, # Текст может быть длиннее для простого сообщения
+                text=text, # Use pre-formatted HTML
                 parse_mode="HTML",
                 disable_web_page_preview=False # Можно сделать True, если превью ссылок не нужны
             )
@@ -91,7 +100,7 @@ async def post_to_channel(bot: Bot, text: str, image_url: Optional[str] = None, 
             logger.warning(f"Попытка отправить только текстовое сообщение в канал {TELEGRAM_CHANNEL_ID} после ошибки с изображением.")
             await bot.send_message(
                 chat_id=TELEGRAM_CHANNEL_ID,
-                text=text,
+                text=text, # Use pre-formatted HTML in fallback as well
                 parse_mode="HTML",
                 disable_web_page_preview=False
             )

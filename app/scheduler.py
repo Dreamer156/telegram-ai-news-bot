@@ -2,8 +2,10 @@ import logging
 import os # Добавлен os для работы с файлами
 from collections import deque # Для FIFO очереди при ограничении файла
 from aiogram import Bot
+import aiohttp # Added for ClientSession
 
 from app.services import rss_service, ai_service, telegram_service
+from app.services.content_fetch_service import fetch_article_content 
 from app.config import OPENAI_IMAGE_MODEL, POSTED_LINKS_FILE, MAX_POSTED_LINKS_IN_FILE
 from app.utils.image_utils import get_final_image_url
 
@@ -45,11 +47,11 @@ def save_posted_link(link: str):
 # Загружаем ссылки один раз при инициализации модуля
 load_posted_links()
 
-async def process_and_post_news(bot: Bot, news_item: dict):
+async def process_and_post_news(bot: Bot, news_item: dict, http_session: aiohttp.ClientSession):
     """Обрабатывает одну новость и постит ее, если она новая."""
     title = news_item.get('title', "Без заголовка")
     link = news_item.get('link', "")
-    summary = news_item.get('summary') or news_item.get('description', "")
+    summary_from_rss = news_item.get('summary') or news_item.get('description', "")
 
     if not link: # Если нет ссылки, мы не можем отследить уникальность
         logger.warning(f"Новость \"{title}\" не имеет ссылки, пропускаем.")
@@ -61,12 +63,25 @@ async def process_and_post_news(bot: Bot, news_item: dict):
 
     logger.info(f"Получена новая новость для постинга: \"{title}\". ({link})")
     
-    # Попытка извлечь полный контент, если есть
-    content_detail = news_item.get('content')
-    full_content = None
-    if content_detail and isinstance(content_detail, list) and len(content_detail) > 0:
-        full_content = content_detail[0].get('value')
+    # Attempt to fetch full article content from the web page
+    fetched_full_content = None
+    if link: # Ensure we have a link to fetch
+        fetched_full_content = await fetch_article_content(link, http_session)
+        if fetched_full_content:
+            logger.info(f"Успешно извлечено полное содержимое для новости: {title[:50]}...")
+        else:
+            logger.warning(f"Не удалось извлечь полное содержимое для новости: {title[:50]}... Будет использовано краткое описание из RSS.")
     
+    # Use fetched full content if available, otherwise fall back to RSS summary/content
+    # The existing logic for 'full_content' from RSS feed's 'content' field can be a secondary fallback
+    content_from_rss_detail = news_item.get('content')
+    rss_full_content_value = None
+    if content_from_rss_detail and isinstance(content_from_rss_detail, list) and len(content_from_rss_detail) > 0:
+        rss_full_content_value = content_from_rss_detail[0].get('value')
+
+    # Priority: 1. Fetched full content, 2. RSS full content field, 3. RSS summary
+    final_content_for_ai = fetched_full_content or rss_full_content_value or summary_from_rss
+
     # Попытка извлечь URL изображения из RSS
     rss_image_url: str | None = None
     if hasattr(news_item, 'media_content') and news_item.media_content and isinstance(news_item.media_content, list):
@@ -87,9 +102,9 @@ async def process_and_post_news(bot: Bot, news_item: dict):
 
     ai_result = await ai_service.reformat_news_for_channel(
         news_title=title,
-        news_summary=summary,
+        news_summary=summary_from_rss, # We can still pass the original summary for context if AI needs it
         news_link=link,
-        news_content=full_content
+        news_content=final_content_for_ai # Pass the potentially richer content
     )
     
     if not ai_result:
@@ -153,13 +168,16 @@ async def scheduled_post_job(bot: Bot):
     # Для текущей задачи, мы будем обрабатывать каждую из 5 новостей,
     # и функция process_and_post_news сама проверит, была ли она уже опубликована.
     
-    processed_count = 0
-    for news_item in reversed(latest_news_items): # Обрабатываем от старых к новым из полученной пачки
-        try:
-            await process_and_post_news(bot, news_item)
-            processed_count += 1
-        except Exception as e:
-            title_for_log = news_item.get('title', 'N/A')
-            logger.error(f"Ошибка при обработке новости \"{title_for_log}\" в scheduled_post_job: {e}", exc_info=True)
-    
-    logger.info(f"Планировщик: завершил проверку новостей. Обработано {processed_count} элементов.") 
+    # Create aiohttp.ClientSession here to reuse for all articles in this job run
+    async with aiohttp.ClientSession() as http_session:
+        processed_count = 0
+        for news_item in reversed(latest_news_items): # Обрабатываем от старых к новым из полученной пачки
+            try:
+                # Pass the session to process_and_post_news
+                await process_and_post_news(bot, news_item, http_session)
+                processed_count += 1
+            except Exception as e:
+                title_for_log = news_item.get('title', 'N/A')
+                logger.error(f"Ошибка при обработке новости \"{title_for_log}\" в scheduled_post_job: {e}", exc_info=True)
+        
+        logger.info(f"Планировщик: завершил проверку новостей. Обработано {processed_count} элементов.") 
